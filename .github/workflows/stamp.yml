@@ -1,0 +1,80 @@
+name: Auto Timestamp & Release Stamp
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'csv/*.7z'
+
+permissions:
+  contents: write
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Stamp & Create Official Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          UTC_TIME="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          BJT_TIME="$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST (UTC+8)')"
+          COMMIT_SHA="${GITHUB_SHA}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          COMMIT_MSG="$(git log -1 --pretty=%B | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # 找出本次提交新增的 csv/*.7z 文件（--root 兼容首次提交）
+          mapfile -t FILES < <(git diff-tree --root --no-commit-id --name-only -r --diff-filter=A HEAD -- 'csv/*.7z')
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "本次推送无新增 csv/*.7z 文件，跳过盖章。"
+            exit 0
+          fi
+
+          for FILE in "${FILES[@]}"; do
+            [ -f "$FILE" ] || continue
+            BASENAME="$(basename "$FILE" .7z)"
+            TAG="stamp-${BASENAME}"
+            if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
+              TAG="stamp-${BASENAME}-${SHORT_SHA}"
+            fi
+
+            ARCHIVE_SHA256="$(sha256sum "$FILE" | awk '{print $1}')"
+            ARCHIVE_SIZE="$(stat -c%s "$FILE")"
+
+            NOTES_FILE="$(mktemp)"
+            {
+              echo "## GitHub Actions 官方存证盖章"
+              echo ""
+              echo "- **官方服务器时间 (UTC)**: \`${UTC_TIME}\`"
+              echo "- **官方服务器时间 (北京时间)**: \`${BJT_TIME}\`"
+              echo "- **加密存证文件**: \`${FILE}\`"
+              echo "- **加密包大小**: \`${ARCHIVE_SIZE} bytes\`"
+              echo "- **加密包 SHA-256**: \`${ARCHIVE_SHA256}\`"
+              echo "- **提交信息 (含原始CSV SHA-256)**: \`${COMMIT_MSG}\`"
+              echo "- **Commit SHA**: \`${COMMIT_SHA}\`"
+              echo "- **Actions 官方运行日志**: ${RUN_URL}"
+              echo ""
+              echo "> 本 Release 由 GitHub Actions 官方服务器在推送时自动生成，运行时间与发布时间由 GitHub 服务端记录，无法回溯或篡改。"
+            } > "$NOTES_FILE"
+
+            echo "========================================"
+            cat "$NOTES_FILE"
+            echo "========================================"
+            cat "$NOTES_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+            gh release create "$TAG" "$FILE" \
+              --title "存证盖章: ${BASENAME}" \
+              --notes-file "$NOTES_FILE"
+            rm -f "$NOTES_FILE"
+          done
